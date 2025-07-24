@@ -1,17 +1,19 @@
-# GStreamer SSP Plugin
+# GStreamer SSP Plugin for Z CAM Cameras
 
-This plugin provides a GStreamer source element for receiving video and audio streams from Z CAM cameras using the Simple Stream Protocol (SSP).
+A GStreamer plugin that enables real-time video and audio streaming from Z CAM cameras using the Simple Stream Protocol (SSP).
+
+**Repository**: https://github.com/jesusluqueMP/gstssp
 
 ## Features
 
-- Support for H.264 and H.265 video streams with auto-detection
-- Support for AAC and PCM audio streams
-- Live streaming with proper timestamping
-- Configurable stream styles (default, main, secondary)
-- Support for video-only, audio-only, or combined modes
-- Automatic codec detection from stream data
-- Dynamic caps negotiation for codec changes
-- Cross-platform support (macOS, Linux, Windows)
+- ✅ **Real-time H.264/H.265 video streaming** from Z CAM cameras
+- ✅ **Audio streaming** (AAC/PCM) support  
+- ✅ **Automatic codec detection** (H.264/H.265)
+- ✅ **Live source** with proper timestamping
+- ✅ **Cross-platform** (macOS, Linux, Windows)
+- ✅ **Dynamic caps negotiation**
+- ✅ **Multiple stream modes** (video-only, audio-only, both)
+- ✅ **Configurable stream styles** (default, main, secondary)
 
 ## Requirements
 
