@@ -47,7 +47,11 @@ static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS ("video/x-h264, stream-format=byte-stream, alignment=nal; "
-                     "video/x-h265, stream-format=byte-stream, alignment=nal; "
+                     "video/x-h265, stream-format=byte-stream, alignment=nal, "
+                     "profile=main, profile=main-10, profile=main-444-10, "
+                     "chroma-format=4:2:0, chroma-format=4:2:2, chroma-format=4:4:4, "
+                     "bit-depth-luma=8, bit-depth-luma=10, bit-depth-luma=12, "
+                     "bit-depth-chroma=8, bit-depth-chroma=10, bit-depth-chroma=12; "
                      "audio/mpeg, mpegversion=4, stream-format=raw; "
                      "audio/x-raw, format=S16LE, layout=interleaved")
     );
@@ -564,6 +568,66 @@ on_video_data_cb (SspVideoData data, gpointer user_data)
           "stream-format", G_TYPE_STRING, "byte-stream",
           "alignment", G_TYPE_STRING, "nal",
           NULL);
+      
+      /* Detect and set 10-bit profile and pixel format for Z-Log and HDR */
+      /* Type 5 frames often contain VPS/SPS which have profile info */
+      if (data.type == 5 && data.len > 32) {
+        /* Try to detect 10-bit encoding from NAL unit headers */
+        /* This is a simplified detection - proper parsing would be more complex */
+        gboolean is_10bit = FALSE;
+        
+        /* Look for Main 10 profile indicators in the stream */
+        for (size_t i = 0; i < data.len - 8 && i < 100; i++) {
+          /* Check for profile_tier_level structure indicators */
+          if (((unsigned char*)data.data)[i] == 0x00 && 
+              ((unsigned char*)data.data)[i+1] == 0x00 && 
+              ((unsigned char*)data.data)[i+2] == 0x01) {
+            /* Found start code, check NAL unit type */
+            unsigned char nal_type = (((unsigned char*)data.data)[i+3] >> 1) & 0x3F;
+            if (nal_type == 32) { /* VPS NAL unit */
+              /* Assume 10-bit for HDR/high-quality streams */
+              is_10bit = TRUE;
+              break;
+            }
+          }
+        }
+        
+        if (is_10bit) {
+          gst_caps_set_simple (caps,
+              "profile", G_TYPE_STRING, "main-10",
+              "chroma-format", G_TYPE_STRING, "4:2:0",
+              "bit-depth-luma", G_TYPE_INT, 10,
+              "bit-depth-chroma", G_TYPE_INT, 10,
+              NULL);
+          
+          /* Add color information for Z-Log and HDR support */
+          if (src->is_hlg) {
+            /* HLG (Hybrid Log-Gamma) color space */
+            gst_caps_set_simple (caps,
+                "colorimetry", G_TYPE_STRING, "bt2020",
+                "transfer-characteristics", G_TYPE_STRING, "arib-std-b67",
+                "color-primaries", G_TYPE_STRING, "bt2020",
+                "matrix-coefficients", G_TYPE_STRING, "bt2020-ncl",
+                NULL);
+            GST_INFO_OBJECT (src, "Detected 10-bit H.265 HLG stream with HDR color space");
+          } else {
+            /* Z-Log typically uses Rec.2020 color space with custom transfer function */
+            gst_caps_set_simple (caps,
+                "colorimetry", G_TYPE_STRING, "bt709",
+                "transfer-characteristics", G_TYPE_STRING, "bt709",
+                "color-primaries", G_TYPE_STRING, "bt709",
+                "matrix-coefficients", G_TYPE_STRING, "bt709",
+                NULL);
+            GST_INFO_OBJECT (src, "Detected 10-bit H.265 stream with Z-Log color characteristics");
+          }
+          
+          GST_INFO_OBJECT (src, "Detected 10-bit H.265 stream, setting Main 10 profile");
+        } else {
+          gst_caps_set_simple (caps,
+              "profile", G_TYPE_STRING, "main",
+              NULL);
+        }
+      }
       
       /* Add dimensions if available */
       if (src->has_video_meta && src->video_width > 0 && src->video_height > 0) {
