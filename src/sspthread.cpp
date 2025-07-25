@@ -61,27 +61,29 @@ void
 SspThread::setup_client(imf::Loop* loop)
 {
     try {
-        client_ = new imf::SspClient(ip_, loop, 0x400000, port_, stream_style_);
+        // Use larger buffer size like ezdump (4MB instead of 4MB)
+        client_ = new imf::SspClient(ip_, loop, 4 * 1024 * 1024, port_, stream_style_);
         
         if (client_->init() != 0) {
             GST_ERROR("Failed to initialize SSP client");
             return;
         }
 
-        // Set up callbacks
+        // Set up callbacks in the same order as ezdump
         client_->setOnH264DataCallback(std::bind(&SspThread::on_video_data, this, std::placeholders::_1));
-        client_->setOnAudioDataCallback(std::bind(&SspThread::on_audio_data, this, std::placeholders::_1));
         client_->setOnMetaCallback(std::bind(&SspThread::on_meta_data, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
         client_->setOnDisconnectedCallback(std::bind(&SspThread::on_disconnected, this));
-        client_->setOnConnectionConnectedCallback(std::bind(&SspThread::on_connected, this));
+        client_->setOnAudioDataCallback(std::bind(&SspThread::on_audio_data, this, std::placeholders::_1));
         client_->setOnExceptionCallback(std::bind(&SspThread::on_exception, this, std::placeholders::_1, std::placeholders::_2));
+        client_->setOnRecvBufferFullCallback(std::bind(&SspThread::on_recv_buffer_full, this));
+        client_->setOnConnectionConnectedCallback(std::bind(&SspThread::on_connected, this));
 
         if (client_->start() != 0) {
             GST_ERROR("Failed to start SSP client");
             return;
         }
 
-        GST_INFO("SSP client started successfully");
+        GST_INFO("SSP client started successfully with 4MB buffer");
     } catch (const std::exception& e) {
         GST_ERROR("Exception in SSP client setup: %s", e.what());
     }
@@ -90,7 +92,11 @@ SspThread::setup_client(imf::Loop* loop)
 void
 SspThread::on_video_data(struct imf::SspH264Data* h264)
 {
+    GST_DEBUG("SSP thread received video data: size=%zu, frm_no=%u, type=%u, pts=%" G_GUINT64_FORMAT, 
+              h264->len, h264->frm_no, h264->type, h264->pts);
+              
     if (!video_callback_) {
+        GST_WARNING("No video callback set, dropping frame");
         return;
     }
 
@@ -221,6 +227,12 @@ SspThread::on_disconnected()
     if (disconnected_callback_) {
         disconnected_callback_(user_data_);
     }
+}
+
+void
+SspThread::on_recv_buffer_full()
+{
+    GST_WARNING("SSP client receive buffer full - may cause frame drops");
 }
 
 void

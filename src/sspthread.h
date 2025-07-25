@@ -87,6 +87,7 @@ private:
     void on_meta_data(struct imf::SspVideoMeta* video_meta, struct imf::SspAudioMeta* audio_meta, struct imf::SspMeta* meta);
     void on_connected();
     void on_disconnected();
+    void on_recv_buffer_full();
     void on_exception(int code, const char* description);
 
     std::unique_ptr<imf::ThreadLoop> thread_loop_;

@@ -407,34 +407,51 @@ gst_ssp_src_create (GstPushSrc * psrc, GstBuffer ** buf)
     return GST_FLOW_ERROR;
   }
 
-  /* Wait for metadata to be received */
+  /* Wait for metadata to be received - but be more tolerant */
   g_mutex_lock (&src->lock);
   int timeout_count = 0;
-  while (!src->has_video_meta && !src->has_audio_meta && src->connected && timeout_count < 50) {
+  while (!src->has_video_meta && !src->has_audio_meta && src->connected && timeout_count < 200) {
     g_mutex_unlock (&src->lock);
-    usleep(10000); /* 10ms sleep */
+    usleep(50000); /* 50ms sleep - longer intervals, more patience */
     timeout_count++;
     g_mutex_lock (&src->lock);
   }
   g_mutex_unlock (&src->lock);
 
+  /* If still no metadata but we're connected, try to continue anyway */
   if (!src->has_video_meta && !src->has_audio_meta) {
-    GST_DEBUG_OBJECT (src, "No metadata received yet, returning not-linked");
-    return GST_FLOW_NOT_LINKED;
+    if (!src->connected) {
+      GST_DEBUG_OBJECT (src, "Disconnected while waiting for metadata");
+      return GST_FLOW_ERROR;
+    }
+    GST_DEBUG_OBJECT (src, "No metadata received yet but connected, trying to get data anyway");
+    /* Don't return GST_FLOW_NOT_LINKED immediately - try to get data */
   }
 
   /* Get buffer from appropriate queue based on mode */
   if (src->mode == GST_SSP_MODE_VIDEO_ONLY || 
-      (src->mode == GST_SSP_MODE_BOTH && src->has_video_meta)) {
+      (src->mode == GST_SSP_MODE_BOTH && (src->has_video_meta || !src->has_audio_meta))) {
+    /* Block until we get a video buffer */
+    GST_DEBUG_OBJECT (src, "Waiting for video buffer from queue (length=%d)", g_async_queue_length(src->video_queue));
     buffer = GST_BUFFER (g_async_queue_pop (src->video_queue));
+    if (buffer) {
+      GST_DEBUG_OBJECT (src, "Got video buffer of size %zu", gst_buffer_get_size(buffer));
+    }
   } else if (src->mode == GST_SSP_MODE_AUDIO_ONLY || 
              (src->mode == GST_SSP_MODE_BOTH && src->has_audio_meta)) {
     buffer = GST_BUFFER (g_async_queue_pop (src->audio_queue));
+    if (buffer) {
+      GST_DEBUG_OBJECT (src, "Got audio buffer of size %zu", gst_buffer_get_size(buffer));
+    }
   }
 
   if (buffer == NULL) {
-    return GST_FLOW_ERROR;
+    GST_DEBUG_OBJECT (src, "No buffer received (disconnected?)");
+    return GST_FLOW_EOS;
   }
+
+  GST_DEBUG_OBJECT (src, "Returning buffer with PTS %" GST_TIME_FORMAT, 
+                    GST_TIME_ARGS(GST_BUFFER_PTS(buffer)));
 
   *buf = buffer;
   return GST_FLOW_OK;
@@ -489,6 +506,9 @@ on_video_data_cb (SspVideoData data, gpointer user_data)
   GstBuffer *buffer;
   GstMemory *memory;
   
+  GST_DEBUG_OBJECT (src, "Received video frame: size=%zu, pts=%" G_GUINT64_FORMAT ", type=%u", 
+                    data.len, data.pts, data.type);
+  
   /* Create GStreamer buffer */
   memory = gst_memory_new_wrapped (GST_MEMORY_FLAG_READONLY, data.data, data.len, 0, data.len, data.data, g_free);
   buffer = gst_buffer_new ();
@@ -516,7 +536,8 @@ on_video_data_cb (SspVideoData data, gpointer user_data)
   }
   
   /* Set caps only once when we first have metadata and caps aren't set yet */
-  if ((src->has_video_meta || data.codec_type != 0) && !src->video_caps_set) {
+  /* For proper decoding, we should wait for an I-frame (keyframe) before setting caps */
+  if ((src->has_video_meta || data.codec_type != 0) && !src->video_caps_set && data.type == 5) {
     GstCaps *caps = NULL;
     guint32 encoder = src->video_encoder;
     
@@ -554,12 +575,19 @@ on_video_data_cb (SspVideoData data, gpointer user_data)
     }
     
     if (caps) {
-      GST_INFO_OBJECT (src, "Setting video caps (once): %" GST_PTR_FORMAT, caps);
+      GST_INFO_OBJECT (src, "Setting video caps with I-frame: %" GST_PTR_FORMAT, caps);
       if (gst_base_src_set_caps (GST_BASE_SRC (src), caps)) {
         src->video_caps_set = TRUE;
       }
       gst_caps_unref (caps);
     }
+  }
+  
+  /* Only push frames to queue if caps are set or it's an I-frame */
+  if (!src->video_caps_set && data.type != 5) {
+    GST_DEBUG_OBJECT (src, "Skipping P-frame before caps are set (waiting for I-frame)");
+    g_free (data.data);
+    return;
   }
   
   g_async_queue_push (src->video_queue, buffer);
