@@ -1,1 +1,0 @@
-This repo contains documents about Z CAM camera.

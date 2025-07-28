@@ -1,6 +1,5 @@
 project('gst-ssp', 'c', 'cpp',
   version : '1.0.0',
-  license : 'LGPL',
   default_options : [
     'warning_level=1',
     'buildtype=debugoptimized',
