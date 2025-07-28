@@ -44,6 +44,8 @@ struct _GstSspSrc
   guint buffer_size;
   guint32 capability;
   gboolean is_hlg;
+  guint max_queue_size;
+  gboolean latency_mode;
 
   /* private */
   gpointer ssp_thread;        /* SspThread* wrapped as gpointer for C compatibility */

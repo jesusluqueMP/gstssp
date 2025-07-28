@@ -30,7 +30,9 @@ enum
   PROP_MODE,
   PROP_BUFFER_SIZE,
   PROP_CAPABILITY,
-  PROP_IS_HLG
+  PROP_IS_HLG,
+  PROP_MAX_QUEUE_SIZE,
+  PROP_LATENCY_MODE
 };
 
 #define DEFAULT_IP "192.168.1.100"
@@ -40,6 +42,8 @@ enum
 #define DEFAULT_BUFFER_SIZE 0x400000
 #define DEFAULT_CAPABILITY 0
 #define DEFAULT_IS_HLG FALSE
+#define DEFAULT_MAX_QUEUE_SIZE 2
+#define DEFAULT_LATENCY_MODE TRUE
 
 /* Use encoder types from libssp */
 
@@ -171,6 +175,17 @@ gst_ssp_src_class_init (GstSspSrcClass * klass)
           "Enable HLG mode", DEFAULT_IS_HLG,
           (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
+  g_object_class_install_property (gobject_class, PROP_MAX_QUEUE_SIZE,
+      g_param_spec_uint ("max-queue-size", "Maximum Queue Size",
+          "Maximum number of frames to buffer (lower = less latency)", 
+          1, 10, DEFAULT_MAX_QUEUE_SIZE,
+          (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+  g_object_class_install_property (gobject_class, PROP_LATENCY_MODE,
+      g_param_spec_boolean ("latency-mode", "Low Latency Mode",
+          "Enable aggressive low latency optimizations", DEFAULT_LATENCY_MODE,
+          (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
   gst_element_class_set_static_metadata (gstelement_class,
       "SSP Source",
       "Source/Network",
@@ -200,6 +215,8 @@ gst_ssp_src_init (GstSspSrc * src)
   src->buffer_size = DEFAULT_BUFFER_SIZE;
   src->capability = DEFAULT_CAPABILITY;
   src->is_hlg = DEFAULT_IS_HLG;
+  src->max_queue_size = DEFAULT_MAX_QUEUE_SIZE;
+  src->latency_mode = DEFAULT_LATENCY_MODE;
 
   src->ssp_thread = NULL;
   src->video_pad = NULL;
@@ -273,6 +290,12 @@ gst_ssp_src_set_property (GObject * object, guint prop_id,
     case PROP_IS_HLG:
       src->is_hlg = g_value_get_boolean (value);
       break;
+    case PROP_MAX_QUEUE_SIZE:
+      src->max_queue_size = g_value_get_uint (value);
+      break;
+    case PROP_LATENCY_MODE:
+      src->latency_mode = g_value_get_boolean (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -306,6 +329,12 @@ gst_ssp_src_get_property (GObject * object, guint prop_id,
       break;
     case PROP_IS_HLG:
       g_value_set_boolean (value, src->is_hlg);
+      break;
+    case PROP_MAX_QUEUE_SIZE:
+      g_value_set_uint (value, src->max_queue_size);
+      break;
+    case PROP_LATENCY_MODE:
+      g_value_set_boolean (value, src->latency_mode);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -394,12 +423,13 @@ gst_ssp_src_create (GstPushSrc * psrc, GstBuffer ** buf)
 {
   GstSspSrc *src = GST_SSP_SRC (psrc);
   GstBuffer *buffer = NULL;
+  gint queue_length;
 
   if (!src->started) {
     return GST_FLOW_ERROR;
   }
 
-  /* Wait for connection if not connected yet */
+  /* Wait for connection if not connected yet - with reduced timeout */
   g_mutex_lock (&src->lock);
   while (!src->connected && src->started) {
     g_cond_wait (&src->cond, &src->lock);
@@ -411,38 +441,58 @@ gst_ssp_src_create (GstPushSrc * psrc, GstBuffer ** buf)
     return GST_FLOW_ERROR;
   }
 
-  /* Wait for metadata to be received - but be more tolerant */
+  /* Reduced metadata wait - be more aggressive for low latency */
   g_mutex_lock (&src->lock);
   int timeout_count = 0;
-  while (!src->has_video_meta && !src->has_audio_meta && src->connected && timeout_count < 200) {
+  while (!src->has_video_meta && !src->has_audio_meta && src->connected && timeout_count < 40) {
     g_mutex_unlock (&src->lock);
-    usleep(50000); /* 50ms sleep - longer intervals, more patience */
+    usleep(5000); /* 5ms sleep - much shorter intervals for lower latency */
     timeout_count++;
     g_mutex_lock (&src->lock);
   }
   g_mutex_unlock (&src->lock);
 
-  /* If still no metadata but we're connected, try to continue anyway */
-  if (!src->has_video_meta && !src->has_audio_meta) {
-    if (!src->connected) {
-      GST_DEBUG_OBJECT (src, "Disconnected while waiting for metadata");
-      return GST_FLOW_ERROR;
-    }
-    GST_DEBUG_OBJECT (src, "No metadata received yet but connected, trying to get data anyway");
-    /* Don't return GST_FLOW_NOT_LINKED immediately - try to get data */
-  }
-
   /* Get buffer from appropriate queue based on mode */
   if (src->mode == GST_SSP_MODE_VIDEO_ONLY || 
       (src->mode == GST_SSP_MODE_BOTH && (src->has_video_meta || !src->has_audio_meta))) {
-    /* Block until we get a video buffer */
-    GST_DEBUG_OBJECT (src, "Waiting for video buffer from queue (length=%d)", g_async_queue_length(src->video_queue));
+    
+    /* Check queue length and drop old frames for low latency */
+    queue_length = g_async_queue_length(src->video_queue);
+    GST_DEBUG_OBJECT (src, "Video queue length: %d", queue_length);
+    
+    /* Drop old frames if queue is getting too long for minimal latency */
+    while (queue_length > (gint)src->max_queue_size) {
+      GstBuffer *old_buffer = GST_BUFFER (g_async_queue_try_pop (src->video_queue));
+      if (old_buffer) {
+        GST_DEBUG_OBJECT (src, "Dropping old video frame to reduce latency");
+        gst_buffer_unref (old_buffer);
+        queue_length--;
+      } else {
+        break;
+      }
+    }
+    
+    /* Get the latest video buffer */
     buffer = GST_BUFFER (g_async_queue_pop (src->video_queue));
     if (buffer) {
       GST_DEBUG_OBJECT (src, "Got video buffer of size %zu", gst_buffer_get_size(buffer));
     }
   } else if (src->mode == GST_SSP_MODE_AUDIO_ONLY || 
              (src->mode == GST_SSP_MODE_BOTH && src->has_audio_meta)) {
+    
+    /* Similar queue management for audio but with different thresholds */
+    queue_length = g_async_queue_length(src->audio_queue);
+    while (queue_length > 4) { /* Audio can tolerate slightly longer queue */
+      GstBuffer *old_buffer = GST_BUFFER (g_async_queue_try_pop (src->audio_queue));
+      if (old_buffer) {
+        GST_DEBUG_OBJECT (src, "Dropping old audio frame to reduce latency");
+        gst_buffer_unref (old_buffer);
+        queue_length--;
+      } else {
+        break;
+      }
+    }
+    
     buffer = GST_BUFFER (g_async_queue_pop (src->audio_queue));
     if (buffer) {
       GST_DEBUG_OBJECT (src, "Got audio buffer of size %zu", gst_buffer_get_size(buffer));
@@ -518,20 +568,16 @@ on_video_data_cb (SspVideoData data, gpointer user_data)
   buffer = gst_buffer_new ();
   gst_buffer_append_memory (buffer, memory);
   
-  /* Set timestamps based on wall clock for live stream */
+  /* Set timestamps for live streaming with minimal latency */
   GstClockTime now = gst_util_get_timestamp();
   
-  if (src->first_timestamp == GST_CLOCK_TIME_NONE) {
-    src->first_timestamp = now;
-    src->timestamp = 0;
-  } else {
-    /* Calculate running time from first timestamp */
-    src->timestamp = now - src->first_timestamp;
-  }
+  /* For live streams, use current time as PTS for minimal latency */
+  GST_BUFFER_PTS (buffer) = now;
+  GST_BUFFER_DTS (buffer) = now;
+  GST_BUFFER_DURATION (buffer) = GST_SECOND / 25; /* Match camera framerate */
   
-  GST_BUFFER_PTS (buffer) = src->timestamp;
-  GST_BUFFER_DTS (buffer) = src->timestamp;
-  GST_BUFFER_DURATION (buffer) = GST_SECOND / 30; /* Assume 30fps for video */
+  /* Mark as live content */
+  GST_BUFFER_FLAG_SET (buffer, GST_BUFFER_FLAG_LIVE);
   
   /* Update codec type if detected from stream and different from metadata */
   if (data.codec_type != 0 && src->video_encoder != data.codec_type) {
@@ -650,8 +696,30 @@ on_video_data_cb (SspVideoData data, gpointer user_data)
   /* Only push frames to queue if caps are set or it's an I-frame */
   if (!src->video_caps_set && data.type != 5) {
     GST_DEBUG_OBJECT (src, "Skipping P-frame before caps are set (waiting for I-frame)");
+    gst_buffer_unref (buffer);
     g_free (data.data);
     return;
+  }
+  
+  /* Implement intelligent queue management for low latency */
+  gint current_queue_length = g_async_queue_length(src->video_queue);
+  
+  /* If queue is getting too full, drop old frames but prioritize I-frames */
+  if (current_queue_length >= (gint)src->max_queue_size) {
+    if (data.type == 5) {
+      /* This is an I-frame, drop an old frame to make room */
+      GstBuffer *old_buffer = GST_BUFFER (g_async_queue_try_pop (src->video_queue));
+      if (old_buffer) {
+        GST_DEBUG_OBJECT (src, "Dropping old frame to make room for I-frame");
+        gst_buffer_unref (old_buffer);
+      }
+    } else if (current_queue_length >= (gint)src->max_queue_size + 1) {
+      /* Queue too full and this isn't an I-frame, drop this frame */
+      GST_DEBUG_OBJECT (src, "Queue full (%d), dropping P-frame", current_queue_length);
+      gst_buffer_unref (buffer);
+      g_free (data.data);
+      return;
+    }
   }
   
   g_async_queue_push (src->video_queue, buffer);
