@@ -1,5 +1,5 @@
 project('gst-ssp', 'c', 'cpp',
-  version : '1.0.0',
+  version : '3.0.0',
   default_options : [
     'warning_level=1',
     'buildtype=debugoptimized',
@@ -9,7 +9,7 @@ project('gst-ssp', 'c', 'cpp',
 
 gst_version = meson.project_version()
 
-api_version = '1.0'
+api_version = '3.0'
 
 gst_req = '>= 1.16.0'
 

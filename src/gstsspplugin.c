@@ -18,6 +18,6 @@ plugin_init (GstPlugin * plugin)
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,
     GST_VERSION_MINOR,
     ssp,
-    "Simple Stream Protocol (SSP) source plugin for Z CAM cameras",
+    "Simple Stream Protocol (SSP) source plugin for Z CAM cameras - Version 3 with low latency optimizations",
     plugin_init, PACKAGE_VERSION, GST_LICENSE, GST_PACKAGE_NAME,
     GST_PACKAGE_ORIGIN)
